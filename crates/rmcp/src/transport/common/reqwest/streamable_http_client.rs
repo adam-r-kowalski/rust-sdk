@@ -186,21 +186,32 @@ impl StreamableHttpClient for reqwest::Client {
         ) {
             return Ok(StreamableHttpPostResponse::Accepted);
         }
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .map(|ct| String::from_utf8_lossy(ct.as_bytes()).to_string());
+        let session_id = response.headers().get(HEADER_SESSION_ID);
+        let session_id = session_id
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
         if !status.is_success() {
             let body = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "<failed to read response body>".to_owned());
+            if content_type
+                .as_deref()
+                .is_some_and(|ct| ct.as_bytes().starts_with(JSON_MIME_TYPE.as_bytes()))
+            {
+                if let Ok(message) = serde_json::from_str::<ServerJsonRpcMessage>(&body) {
+                    return Ok(StreamableHttpPostResponse::Json(message, session_id));
+                }
+            }
             return Err(StreamableHttpError::UnexpectedServerResponse(Cow::Owned(
                 format!("HTTP {status}: {body}"),
             )));
         }
-        let content_type = response.headers().get(reqwest::header::CONTENT_TYPE);
-        let session_id = response.headers().get(HEADER_SESSION_ID);
-        let session_id = session_id
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        match content_type {
+        match content_type.as_deref() {
             Some(ct) if ct.as_bytes().starts_with(EVENT_STREAM_MIME_TYPE.as_bytes()) => {
                 let event_stream = SseStream::from_byte_stream(response.bytes_stream()).boxed();
                 Ok(StreamableHttpPostResponse::Sse(event_stream, session_id))
@@ -222,9 +233,7 @@ impl StreamableHttpClient for reqwest::Client {
             _ => {
                 // unexpected content type
                 tracing::error!("unexpected content type: {:?}", content_type);
-                Err(StreamableHttpError::UnexpectedContentType(
-                    content_type.map(|ct| String::from_utf8_lossy(ct.as_bytes()).to_string()),
-                ))
+                Err(StreamableHttpError::UnexpectedContentType(content_type))
             }
         }
     }
